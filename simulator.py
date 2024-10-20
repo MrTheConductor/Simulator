@@ -141,87 +141,166 @@ values = COMM_GET_VALUES(
 class BatteryVoltageControl:
     def __init__(self, master):
         self.master = master
-        self.min_voltage = tk.DoubleVar()
-        self.max_voltage = tk.DoubleVar()
-        self.voltage = tk.DoubleVar()
+        # Initial values - approximate for 15S battery
+        self.min_voltage = tk.DoubleVar(value=30.0)
+        self.max_voltage = tk.DoubleVar(value=70.0)
+        self.voltage = tk.DoubleVar(value=60.0)
 
-        self.min_spinbox = tk.Spinbox(master, from_=0.0, to=10.0, textvariable=self.min_voltage)
-        self.min_spinbox.pack()
+        self.label_frame = tk.LabelFrame(master, text="Battery Voltage Control")
+        self.label_frame.pack(padx=10, pady=10, fill=tk.X, expand=True)
 
-        self.max_spinbox = tk.Spinbox(master, from_=0.0, to=10.0, textvariable=self.max_voltage)
-        self.max_spinbox.pack()
+        self.min_label = tk.Label(self.label_frame, text="Minimum Voltage:")
+        self.min_label.grid(row=0, column=0, padx=5, pady=5)
+        self.min_spinbox = tk.Spinbox(self.label_frame, from_=0.0, to=100.0, increment=0.1, textvariable=self.min_voltage)
+        self.min_spinbox.grid(row=0, column=1, padx=5, pady=5)
+        self.min_tooltip = tk.Label(self.label_frame, text="Minimum voltage threshold")
+        self.min_tooltip.grid(row=0, column=2, padx=5, pady=5)
 
-        self.scale = tk.Scale(master, from_=self.min_voltage.get(), to=self.max_voltage.get(), resolution=0.1, orient=tk.HORIZONTAL, variable=self.voltage)
-        self.scale.pack()
+        self.max_label = tk.Label(self.label_frame, text="Maximum Voltage:")
+        self.max_label.grid(row=1, column=0, padx=5, pady=5)
+        self.max_spinbox = tk.Spinbox(self.label_frame, from_=0.0, to=200.0, increment=0.1, textvariable=self.max_voltage)
+        self.max_spinbox.grid(row=1, column=1, padx=5, pady=5)
+        self.max_tooltip = tk.Label(self.label_frame, text="Maximum voltage threshold")
+        self.max_tooltip.grid(row=1, column=2, padx=5, pady=5)
+
+        self.scale = tk.Scale(self.label_frame, from_=self.min_voltage.get(), to=self.max_voltage.get(), resolution=0.1, orient=tk.HORIZONTAL, variable=self.voltage)
+        self.scale.grid(row=2, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
 
         self.update_scale()
 
         self.min_spinbox.config(command=self.update_scale)
         self.max_spinbox.config(command=self.update_scale)
 
+        self.voltage.trace_add("write", self.update_voltage)
+        self.update_voltage()
+
+    def update_voltage(self, *args):
+        values.voltage_filtered = self.voltage.get()
+
     def update_scale(self):
         self.scale.config(from_=self.min_voltage.get(), to=self.max_voltage.get())
 
-class GUI(tk.Tk):
-    def __init__(self):
-        super().__init__()
-        self.title("VESC Simulator")
+class DutyCycleControl:
+    def __init__(self, master):
+        self.master = master
+        self.duty_cycle = tk.DoubleVar()
+        self.link_to_rpm = tk.BooleanVar(value=True)
 
-        self.grid_columnconfigure(1, minsize=200)
+        self.label_frame = tk.LabelFrame(master, text="Duty Cycle Control")
+        self.label_frame.pack(padx=10, pady=10, fill=tk.X, expand=True)
 
-        self.label_temp_fet = tk.Label(self, text="temp_fet")
-        self.label_temp_motor = tk.Label(self, text="temp_motor")
-        self.label_avg_motor_current = tk.Label(self, text="avg_motor_current")
-        self.label_avg_input_current = tk.Label(self, text="avg_input_current")
-        self.label_avg_id = tk.Label(self, text="avg_id")
-        self.label_avg_iq = tk.Label(self, text="avg_iq")
-        self.label_duty_cycle_now = tk.Label(self, text="duty_cycle_now")
-        self.label_voltage_filtered = tk.Label(self, text="voltage_filtered")
-        self.label_amp_hours = tk.Label(self, text="amp_hours")
-        self.label_amp_hours_charged = tk.Label(self, text="amp_hours_charged")
-        self.label_watt_hours = tk.Label(self, text="watt_hours")
-        self.label_watt_hours_charged = tk.Label(self, text="watt_hours_charged")
-        self.label_tachometer = tk.Label(self, text="tachometer")
-        self.label_tachometer_abs = tk.Label(self, text="tachometer_abs")
-        self.label_fault = tk.Label(self, text="fault")
-        self.label_rpm = tk.Label(self, text="rpm")
+        self.scale = tk.Scale(self.label_frame, from_=0.0, to=1.0, resolution=0.01, orient=tk.HORIZONTAL, variable=self.duty_cycle)
+        self.scale.pack(padx=5, pady=5, fill=tk.X, expand=True)
 
-        self.label_temp_fet.grid(row=0, column=0)
-        self.label_temp_motor.grid(row=1, column=0)
-        self.label_avg_motor_current.grid(row=2, column=0)
-        self.label_avg_input_current.grid(row=3, column=0)
-        self.label_avg_id.grid(row=4, column=0)  
-        self.label_avg_iq.grid(row=5, column=0)
-        self.label_duty_cycle_now.grid(row=6, column=0) 
-        self.label_voltage_filtered.grid(row=7, column=0)   
-        self.label_amp_hours.grid(row=8, column=0)
-        self.label_amp_hours_charged.grid(row=9, column=0)
-        self.label_watt_hours.grid(row=10, column=0)
-        self.label_watt_hours_charged.grid(row=11, column=0)
-        self.label_tachometer.grid(row=12, column=0)
-        self.label_tachometer_abs.grid(row=13, column=0)
-        self.label_fault.grid(row=14, column=0)
-        self.label_rpm.grid(row=15, column=0)
+        self.link_checkbox = tk.Checkbutton(self.label_frame, text="Link to RPM", variable=self.link_to_rpm)
+        self.link_checkbox.pack(padx=5, pady=5)
 
-        # Battery settings
-        voltage_filtered_slider = tk.Scale(self, from_=0, to=100, orient=tk.HORIZONTAL, label="Battery Voltage", resolution=0.1, command=lambda value: setattr(values, "voltage_filtered", float(value)))
-        voltage_filtered_slider.set(60.0)  # initial value
-        voltage_filtered_slider.grid(row=7, column=1, sticky="ew")
+        self.duty_cycle.trace_add("write", self.update_duty_cycle)
+        self.update_duty_cycle()
 
-        voltage_filtered_min = tk.Spinbox(self, from_=0, to=100, increment=0.1)
-        voltage_filtered_min.grid(row=7, column=2, sticky="ew")
+    def update_duty_cycle(self, *args):
+        values.duty_cycle_now = self.duty_cycle.get()
 
-        duty_cycle_slider = tk.Scale(self, from_=0, to=1, orient=tk.HORIZONTAL, label="Duty Cycle", resolution=0.01, command=lambda value: setattr(values, "duty_cycle_now", float(value)))
-        duty_cycle_slider.set(0.0)  # initial value
-        duty_cycle_slider.grid(row=6, column=1, sticky="ew")
+    def update_duty_cycle_from_rpm(self, rpm):
+        rpm = abs(rpm)
+        if rpm >= 800:
+            self.duty_cycle.set(1.0)
+        else:
+            self.duty_cycle.set(rpm / 800.0)
 
-        avg_input_current_slider = tk.Scale(self, from_=0, to=1, orient=tk.HORIZONTAL, label="Average Input Current", resolution=0.01, command=lambda value: setattr(values, "avg_input_current", float(value)))
-        avg_input_current_slider.set(0.0)  # initial value
-        avg_input_current_slider.grid(row=3, column=1, sticky="ew")
+class InputCurrentControl:
+    def __init__(self, master):
+        self.master = master
+        self.input_current = tk.DoubleVar()
+        self.link_to_rpm = tk.BooleanVar(value=True)
 
-        rpm_slider = tk.Scale(self, from_=-8000, to=8000, orient=tk.HORIZONTAL, label="RPM", resolution=1, command=lambda value: setattr(values, "rpm", float(value)))
-        rpm_slider.set(0)  # initial value
-        rpm_slider.grid(row=15, column=1, sticky="ew")
+        self.label_frame = tk.LabelFrame(master, text="Input Current Control")
+        self.label_frame.pack(padx=10, pady=10, fill=tk.X, expand=True)
+
+        self.scale = tk.Scale(self.label_frame, from_=0.0, to=1.0, resolution=0.01, orient=tk.HORIZONTAL, variable=self.input_current)
+        self.scale.pack(padx=5, pady=5, fill=tk.X, expand=True)
+
+        self.link_checkbox = tk.Checkbutton(self.label_frame, text="Link to RPM", variable=self.link_to_rpm)
+        self.link_checkbox.pack(padx=5, pady=5)
+
+        self.input_current.trace_add("write", self.update_input_current)
+        self.update_input_current()
+
+    def update_input_current(self, *args):
+        values.avg_input_current = self.input_current.get()
+    
+    def update_input_current_from_rpm(self, rpm):
+        rpm = abs(rpm)
+        if rpm >= 200:
+            self.input_current.set(1.0)
+        else:
+            self.input_current.set(rpm / 200.0)
+
+class RPMControl:
+    def __init__(self, master, duty_cycle_control, input_current_control):
+        self.master = master
+        self.duty_cycle_control = duty_cycle_control
+        self.input_current_control = input_current_control
+
+        self.min_rpm = tk.IntVar(value=-900)
+        self.max_rpm = tk.IntVar(value=900)
+        self.rpm = tk.IntVar(value=0)
+        self.tire_circumference = tk.DoubleVar(value=33.75)
+        self.speed_mph = tk.StringVar(value="0.0 mph")
+
+        self.label_frame = tk.LabelFrame(master, text="RPM Control")
+        self.label_frame.pack(padx=10, pady=10, fill=tk.X, expand=True)
+
+        # Minimum RPM Spinbox
+        self.min_label = tk.Label(self.label_frame, text="Min RPM")
+        self.min_label.grid(row=0, column=0, padx=5, pady=5)
+        self.min_spinbox = tk.Spinbox(self.label_frame, from_=-10000, to=10000, textvariable=self.min_rpm)
+        self.min_spinbox.grid(row=0, column=1, padx=5, pady=5)
+
+        # Maximum RPM Spinbox
+        self.max_label =tk.Label(self.label_frame, text="Max RPM")
+        self.max_label.grid(row=1, column=0, padx=5, pady=5)
+        self.max_spinbox = tk.Spinbox(self.label_frame, from_=-10000, to=10000, textvariable=self.max_rpm)
+        self.max_spinbox.grid(row=1, column=1, padx=5, pady=5)
+
+        # RPM Scale
+        self.rpm_scale = tk.Scale(self.label_frame, from_=self.min_rpm.get(), to=self.max_rpm.get(), orient=tk.HORIZONTAL, variable=self.rpm)
+        self.rpm_scale.grid(row=2, column=0, columnspan=2, padx=5, pady=5, sticky="ew")
+
+        # Speed MPH Label
+        self.mph_label = tk.Label(self.label_frame, textvariable=self.speed_mph)
+        self.mph_label.grid(row=2, column=3, padx=5, pady=5)
+
+        # Tire Circumference Spinbox
+        self.tire_circumference_label = tk.Label(self.label_frame, text="Tire Circumference (inches)")
+        self.tire_circumference_label.grid(row=3, column=0, padx=5, pady=5)
+        self.tire_circumference_spinbox = tk.Spinbox(self.label_frame, from_=0.0, to=100.0, increment=0.1, textvariable=self.tire_circumference)
+        self.tire_circumference_spinbox.grid(row=3, column=1, padx=5, pady=5)
+
+        # Update speed MPH label when RPM or tire circumference changes
+        self.rpm.trace_add("write", self.update_speed_mph)
+        self.tire_circumference.trace_add("write", self.update_speed_mph)
+        self.update_speed_mph()
+
+    def update_speed_mph(self, *args):
+        if self.input_current_control.link_to_rpm.get():
+            self.input_current_control.update_input_current_from_rpm(self.rpm.get())
+
+        if self.duty_cycle_control.link_to_rpm.get():
+            self.duty_cycle_control.update_duty_cycle_from_rpm(self.rpm.get())
+
+        values.rpm = self.rpm.get()
+        rpm = self.rpm.get()
+        circumference = self.tire_circumference.get()
+        speed_mph = (abs(rpm) * circumference ) / 1056   # convert RPM to MPH
+        self.speed_mph.set(f"{speed_mph:.1f} mph")
+
+        # Update RPM scale range when min or max RPM changes
+        self.min_rpm.trace_add("write", self.update_rpm_scale)
+        self.max_rpm.trace_add("write", self.update_rpm_scale)
+
+    def update_rpm_scale(self, *args):
+        self.rpm_scale.config(from_=self.min_rpm.get(), to=self.max_rpm.get())
 
 run_thread = True
 
@@ -247,10 +326,7 @@ def serial_port_main_loop():
                 if frame[0]==0x04:
                     payload = values.to_bytearray()
                     payload_length = len(payload)
-                    if random.random() < 0.1:
-                        crc = 0xdead 
-                    else:
-                        crc = crc16(payload)
+                    crc = crc16(payload)
                     payload += crc.to_bytes(2, byteorder='big')
                     ser.write(b'\x02')
                     ser.write(payload_length.to_bytes(1, byteorder='big'))
@@ -262,11 +338,16 @@ def serial_port_main_loop():
                 print('Invalid frame received')
 
 serial_thread = threading.Thread(target=serial_port_main_loop)
-# serial_thread.start()
+serial_thread.start()
 
-gui = GUI()
-# control = BatteryVoltageControl(gui)
-gui.mainloop()
+# gui = GUI()
+root = tk.Tk()
+root.title("VESC Simulator")
+battery_control = BatteryVoltageControl(root)
+duty_cycle_control = DutyCycleControl(root)
+input_current_control = InputCurrentControl(root)
+rpm_control = RPMControl(root, duty_cycle_control, input_current_control)
+root.mainloop()
 
 # Check if the serial thread is still running
 if serial_thread.is_alive():
