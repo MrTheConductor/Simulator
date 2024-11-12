@@ -1,4 +1,5 @@
 import argparse
+import time
 import serial
 import struct
 from enum import Enum
@@ -8,21 +9,28 @@ import tkinter as tk
 from tkinter import ttk
 import threading
 import random
+import sys
 
 parser = argparse.ArgumentParser()
 parser.add_argument("-p", "--port", help="set serial port to use",
                     type=str, default="COM8")
+parser.add_argument("-f", "--fuzz", help="enable fuzzing of the custom app commands",
+                    action="store_true", default=False)
 args = parser.parse_args()
 
 def uint8_to_bytes(data):
     return data.to_bytes(1, byteorder='big')
 
+def float8_to_bytes(data, base=10):
+    fixed8 = int(data * base)
+    return fixed8.to_bytes(1, byteorder='big', signed=True)
+
 def float16_to_bytes(data, base=10):
-    fixed16 = int(data * base);
+    fixed16 = int(data * base)
     return fixed16.to_bytes(2, byteorder='big', signed=True)
 
 def float32_to_bytes(data, base=1):
-    fixed32 = int(data * base);
+    fixed32 = int(data * base)
     return fixed32.to_bytes(4, byteorder='big', signed=True)
 
 @dataclass
@@ -72,6 +80,43 @@ class COMM_GET_VALUES:
         )
         return bytearray(data)
 
+@dataclass
+class COMM_CUSTOM_APP_DATA:
+    id: int
+    floatpkg: int
+    floatcmd: int
+    state: int
+    fault: int
+    pitch_or_duty_cycle: int
+    rpm: float
+    avgInputCurrent: float
+    inpVoltage: float
+    headlightBrightness: int
+    headlightIdleBrightness: int
+    statusbarBrightness: int
+
+    def to_bytearray(self) -> bytearray:
+        # Define the struct format for packing data
+        format_str = '1s1s1s1s1s1s2s2s2s1s1s1s'
+
+        # Pack the data into a binary format
+        data = struct.pack(
+            format_str,
+            uint8_to_bytes(self.id),
+            uint8_to_bytes(self.floatpkg),
+            uint8_to_bytes(self.floatcmd),
+            uint8_to_bytes(self.state),
+            uint8_to_bytes(self.fault),
+            float8_to_bytes(self.pitch_or_duty_cycle, 100),
+            float16_to_bytes(self.rpm),
+            float16_to_bytes(self.avgInputCurrent, 100),
+            float16_to_bytes(self.inpVoltage, 10),
+            uint8_to_bytes(self.headlightBrightness),
+            uint8_to_bytes(self.headlightIdleBrightness),
+            uint8_to_bytes(self.statusbarBrightness)
+        )
+        return bytearray(data)
+
 # CRC Table
 crc16_tab = [
     0x0000, 0x1021, 0x2042, 0x3063, 0x4084, 0x50a5, 0x60c6, 0x70e7, 0x8108, 0x9129, 0xa14a, 0xb16b, 0xc18c, 0xd1ad,
@@ -115,6 +160,7 @@ def parse_frame(data):
     crc = struct.unpack('>H', data[-3:-1])[0]
     calculated_crc = crc16(payload)
     if crc != calculated_crc:
+        print("Invalid CRC16: recieved 0x{:04x}, calculated 0x{:04x}".format(crc, calculated_crc))
         return None  # invalid CRC16
     return payload
 
@@ -138,6 +184,27 @@ values = COMM_GET_VALUES(
     fault=0
 )
 
+class RunState(Enum):
+    STATE_DISABLED = 0
+    STATE_STARTUP = 1
+    STATE_READY = 2
+    STATE_RUNNING = 3
+
+lcm_poll_response = COMM_CUSTOM_APP_DATA(
+    id = 0x24,
+    floatpkg= 0x65,
+    floatcmd = 0x18,
+    state = 3,
+    fault = 0, 
+    pitch_or_duty_cycle = 0, 
+    rpm = 0.0,
+    avgInputCurrent = 0.0,
+    inpVoltage = 0.0,
+    headlightBrightness = 100,
+    headlightIdleBrightness = 100,
+    statusbarBrightness = 100 
+)
+
 class BatteryVoltageControl:
     def __init__(self, master):
         self.master = master
@@ -145,6 +212,8 @@ class BatteryVoltageControl:
         self.min_voltage = tk.DoubleVar(value=30.0)
         self.max_voltage = tk.DoubleVar(value=70.0)
         self.voltage = tk.DoubleVar(value=60.0)
+        self.enable_tick = tk.BooleanVar(value=False)
+        self.tick_up = False
 
         self.label_frame = tk.LabelFrame(master, text="Battery Voltage Control")
         self.label_frame.pack(padx=10, pady=10, fill=tk.X, expand=True)
@@ -166,19 +235,34 @@ class BatteryVoltageControl:
         self.scale = tk.Scale(self.label_frame, from_=self.min_voltage.get(), to=self.max_voltage.get(), resolution=0.1, orient=tk.HORIZONTAL, variable=self.voltage)
         self.scale.grid(row=2, column=0, columnspan=3, padx=5, pady=5, sticky="ew")
 
-        self.update_scale()
+        self.enable_tick_checkbox = tk.Checkbutton(self.label_frame, text="Enable", variable=self.enable_tick)
+        self.enable_tick_checkbox.grid(row=3, column=0, columnspan=3, padx=5, pady=5)
 
-        self.min_spinbox.config(command=self.update_scale)
-        self.max_spinbox.config(command=self.update_scale)
-
+        self.min_voltage.trace_add("write", self.update_scale)
+        self.max_voltage.trace_add("write", self.update_scale)
         self.voltage.trace_add("write", self.update_voltage)
+
         self.update_voltage()
 
     def update_voltage(self, *args):
         values.voltage_filtered = self.voltage.get()
+        lcm_poll_response.inpVoltage = self.voltage.get()
 
-    def update_scale(self):
+    def update_scale(self, *args):
         self.scale.config(from_=self.min_voltage.get(), to=self.max_voltage.get())
+    
+    def tick(self):
+        if self.enable_tick.get():
+            if self.tick_up:
+                if self.voltage.get() < self.max_voltage.get():
+                    self.voltage.set(self.voltage.get() + 0.01)
+                else:
+                    self.tick_up = False
+            else:
+                if self.voltage.get() > self.min_voltage.get():
+                    self.voltage.set(self.voltage.get() - 0.01)
+                else:
+                    self.tick_up = True
 
 class DutyCycleControl:
     def __init__(self, master):
@@ -200,6 +284,7 @@ class DutyCycleControl:
 
     def update_duty_cycle(self, *args):
         values.duty_cycle_now = self.duty_cycle.get()
+        lcm_poll_response.pitch_or_duty_cycle = self.duty_cycle.get()
 
     def update_duty_cycle_from_rpm(self, rpm):
         rpm = abs(rpm)
@@ -228,6 +313,7 @@ class InputCurrentControl:
 
     def update_input_current(self, *args):
         values.avg_input_current = self.input_current.get()
+        lcm_poll_response.avgInputCurrent = self.input_current.get()
     
     def update_input_current_from_rpm(self, rpm):
         rpm = abs(rpm)
@@ -241,11 +327,13 @@ class RPMControl:
         self.master = master
         self.duty_cycle_control = duty_cycle_control
         self.input_current_control = input_current_control
+        self.enable_tick = tk.BooleanVar(value=False)
+        self.tick_up = True
 
         self.min_rpm = tk.IntVar(value=-900)
         self.max_rpm = tk.IntVar(value=900)
         self.rpm = tk.IntVar(value=0)
-        self.tire_circumference = tk.DoubleVar(value=33.75)
+        self.tire_circumference = tk.DoubleVar(value=32.75)
         self.speed_mph = tk.StringVar(value="0.0 mph")
 
         self.label_frame = tk.LabelFrame(master, text="RPM Control")
@@ -282,6 +370,9 @@ class RPMControl:
         self.tire_circumference.trace_add("write", self.update_speed_mph)
         self.update_speed_mph()
 
+        self.enable_tick_checkbox = tk.Checkbutton(self.label_frame, text="Enable Tick", variable=self.enable_tick)
+        self.enable_tick_checkbox.grid(row=4, column=0, columnspan=2, padx=5, pady=5)
+
     def update_speed_mph(self, *args):
         if self.input_current_control.link_to_rpm.get():
             self.input_current_control.update_input_current_from_rpm(self.rpm.get())
@@ -290,6 +381,8 @@ class RPMControl:
             self.duty_cycle_control.update_duty_cycle_from_rpm(self.rpm.get())
 
         values.rpm = self.rpm.get()
+        lcm_poll_response.rpm = self.rpm.get()
+
         rpm = self.rpm.get()
         circumference = self.tire_circumference.get()
         speed_mph = (abs(rpm) * circumference ) / 1056   # convert RPM to MPH
@@ -301,41 +394,121 @@ class RPMControl:
 
     def update_rpm_scale(self, *args):
         self.rpm_scale.config(from_=self.min_rpm.get(), to=self.max_rpm.get())
+    
+    def tick(self):
+        if self.enable_tick.get():
+            if self.tick_up:
+                if self.rpm.get() < self.max_rpm.get():
+                    self.rpm.set(self.rpm.get() + 1)
+                else:
+                    self.tick_up = False
+            else:
+                if self.rpm.get() > self.min_rpm.get():
+                    self.rpm.set(self.rpm.get() - 1)
+                else:
+                    self.tick_up = True
 
-run_thread = True
+class FloatControl:
+    def __init__(self, master):
+        self.master = master
+        self.enabled = tk.BooleanVar(value=True)
+        self.headlight_brightness = tk.IntVar(value=80)
+        self.headlight_idle_brightness = tk.IntVar(value=40)
+        self.statusbar_brightness = tk.IntVar(value=40)
+
+        self.label_frame = tk.LabelFrame(self.master, text="Float Control")
+        self.label_frame.pack(padx=10, pady=10, fill=tk.X, expand=True)
+
+        # Create checkbox to enable/disable settings
+        tk.Checkbutton(self.label_frame, text="Enable", variable=self.enabled).grid(row=0, column=0, columnspan=2, padx=5, pady=5)
+
+        # Create sliders
+        tk.Label(self.label_frame, text="Headlight Brightness").grid(row=1, column=0, padx=5, pady=5)
+        tk.Scale(self.label_frame, from_=0, to=100, orient=tk.HORIZONTAL, variable=self.headlight_brightness, command=self.update_headlight_brightness).grid(row=1, column=1, padx=5, pady=5, sticky=tk.EW)
+        tk.Label(self.label_frame, text="Headlight Idle Brightness").grid(row=2, column=0, padx=5, pady=5)
+        tk.Scale(self.label_frame, from_=0, to=100, orient=tk.HORIZONTAL, variable=self.headlight_idle_brightness, command=self.update_headlight_idle_brightness).grid(row=2, column=1, padx=5, pady=5, sticky=tk.EW)
+        tk.Label(self.label_frame, text="Statusbar Brightness").grid(row=3, column=0, padx=5, pady=5)
+        tk.Scale(self.label_frame, from_=0, to=100, orient=tk.HORIZONTAL, variable=self.statusbar_brightness, command=self.update_statusbar_brightness).grid(row=3, column=1, padx=5, pady=5, sticky=tk.EW)
+        self.label_frame.grid_columnconfigure(1, weight=1)
+
+    def update_headlight_brightness(self, value):
+        lcm_poll_response.headlightBrightness = int(value)
+
+    def update_headlight_idle_brightness(self, value):
+        lcm_poll_response.headlightIdleBrightness = int(value)
+
+    def update_statusbar_brightness(self, value):
+        lcm_poll_response.statusbarBrightness = int(value)
+
+stop_event = threading.Event()
 
 def serial_port_main_loop():
-    global run_thread
-    with serial.Serial(args.port, 115200) as ser:
-        while run_thread:
-            data = bytearray()
-            while True:
-                byte = ser.read(1)
-                if byte == b'\x02':
-                    data.append(byte[0])
-                    break
-            while len(data) < 5:
-                byte = ser.read(1)
-                data.append(byte[0])
-            length = data[1]
-            while len(data) < length + 5:
-                byte = ser.read(1)
-                data.append(byte[0])
-            frame = parse_frame(data)
-            if frame:
-                if frame[0]==0x04:
-                    payload = values.to_bytearray()
-                    payload_length = len(payload)
-                    crc = crc16(payload)
-                    payload += crc.to_bytes(2, byteorder='big')
-                    ser.write(b'\x02')
-                    ser.write(payload_length.to_bytes(1, byteorder='big'))
-                    ser.write(payload)
-                    ser.write(b'\x03')
-                else:
-                    print("Unknown frame received")
-            else:
-                print('Invalid frame received')
+    while not stop_event.is_set():
+        try:
+            with serial.Serial(args.port, 115200) as ser:
+                while not stop_event.is_set():
+                    data = bytearray()
+                    while True:
+                        byte = ser.read(1)
+                        if byte == b'\x02':
+                            data.append(byte[0])
+                            break
+                    while len(data) < 5:
+                        byte = ser.read(1)
+                        data.append(byte[0])
+                    length = data[1]
+                    while len(data) < length + 5:
+                        byte = ser.read(1)
+                        data.append(byte[0])
+                    frame = parse_frame(data)
+                    if frame:
+                        if frame[0]==0x04:
+                            payload = values.to_bytearray()
+                            payload_length = len(payload)
+                            crc = crc16(payload)
+                            payload += crc.to_bytes(2, byteorder='big')
+                            ser.write(b'\x02')
+                            ser.write(payload_length.to_bytes(1, byteorder='big'))
+                            ser.write(payload)
+                            ser.write(b'\x03')
+                        elif frame[0] == 0x24:
+                            if frame[1] == 0x65:
+                                if frame[2] == 0x18:
+                                    payload = lcm_poll_response.to_bytearray()
+                                    # Add payload fuzzer
+                                    if args.fuzzer:
+                                        for i in range(0, random.randint(0, 200)):
+                                            payload.append(random.randint(0, 255))
+                                    payload_length = len(payload)
+                                    crc = crc16(payload)
+                                    payload += crc.to_bytes(2, byteorder='big')
+                                    ser.write(b'\x02')
+                                    ser.write(payload_length.to_bytes(1, byteorder='big'))
+                                    ser.write(payload)
+                                    ser.write(b'\x03')
+                                elif frame[2] == 0x1c:
+                                    print("FLOAT_COMMAND_CHARGESTATE")
+                                elif frame[2] == 0x63:
+                                    print("FLOAT_COMMAND_LMC_DEBUG")
+                                else:
+                                    print("Unknown FLOAT_COMMAND")
+                            else:
+                                print("Unknown custom app")
+                        else:
+                            print("Unknown frame received")
+                    else:
+                        print('Invalid frame received')
+        except Exception as e:
+            print("Serial port error: ", e)
+            time.sleep(5)
+
+def ticking_loop():
+    print("Ticking loop started")
+    while not stop_event.is_set():
+        time.sleep(0.01)
+        rpm_control.tick()
+        battery_control.tick()
+    print("Ticking loop stopped")
 
 serial_thread = threading.Thread(target=serial_port_main_loop)
 serial_thread.start()
@@ -347,10 +520,17 @@ battery_control = BatteryVoltageControl(root)
 duty_cycle_control = DutyCycleControl(root)
 input_current_control = InputCurrentControl(root)
 rpm_control = RPMControl(root, duty_cycle_control, input_current_control)
+float_control = FloatControl(root)
+
+tick_thread = threading.Thread(target=ticking_loop)
+tick_thread.start()
+
 root.mainloop()
 
+
 # Check if the serial thread is still running
-if serial_thread.is_alive():
-    run_thread = False
-    # Wait for the thread to finish
+if serial_thread.is_alive() or tick_thread.is_alive():
+    print("Waiting for threads to finish...")
+    stop_event.set()
     serial_thread.join()
+    tick_thread.join()
